@@ -1,0 +1,21 @@
+# Ignore everything by default. Track only the minimal runnable tree.
+*
+
+!.gitignore
+!LICENSE
+!README.md
+!flake.nix
+!flake.lock
+
+!gap/
+gap/*
+!gap/Makefile
+!gap/benchmark/
+gap/benchmark/*
+!gap/benchmark/bench.mk
+!gap/src/
+!gap/src/**
+
+!scripts/
+scripts/*
+!scripts/run_snap_gap_experiments.sh

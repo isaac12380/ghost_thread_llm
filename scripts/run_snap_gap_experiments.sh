@@ -64,7 +64,7 @@ prepare_graph_inputs() {
 
   mkdir -p "${raw_dir}" "${graph_dir}"
   cd "${gap_dir}"
-  make converter
+  g++ -std=c++11 -pthread -O3 -Wall -w "src/converter.cc" -o converter
 
   for graph in "${graphs[@]}"; do
     archive="${raw_dir}/${graph}.tar.gz"

@@ -4,20 +4,15 @@ set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
   cat <<'EOF' >&2
-Usage:
-  run_snap_gap_experiments.sh <smt_core0> <smt_core1> [repeat]
+Usage: run_snap_gap_experiments.sh <smt_core0> <smt_core1> [repeat]
 
-This script downloads/converts four SuiteSparse SNAP graphs and runs
-baseline, HOMP, SWPF, and HTPF variants for GAP kernels on them.
+Download/convert the retained SNAP graphs, then run GAP baseline, HOMP,
+SWPF, and HTPF variants.
 
-Outputs are written under gap/output/snap/runs/<timestamp>/.
-
-Optional environment variables:
-  SNAP_GAP_FIXED_SOURCE=1        Detect one source per graph for source-based
-                                 kernels (bfs/bc/sssp) and pass -r so all
-                                 trials/variants use the same source
-  SNAP_GAP_WARMUP_RUNS=1         Number of warm-up executions per variant before
-                                 capturing the measured log
+Env:
+  SNAP_GAP_FIXED_SOURCE=1   Reuse one detected source for bfs/bc/sssp
+  SNAP_GAP_WARMUP_RUNS=1    Warm-up runs before the measured run
+  SNAP_GAP_RUN_NAME=<tag>   Override output directory name
 EOF
   exit 1
 fi
@@ -39,6 +34,8 @@ warmup_runs="${SNAP_GAP_WARMUP_RUNS:-1}"
 
 declare -a kernels=("bfs" "bc" "cc" "pr" "sssp" "tc")
 declare -a graphs=("web-Stanford" "web-Google" "amazon0312" "roadNet-PA")
+compile_flags=(-std=c++11 -pthread -O3 -Wall -w)
+htpf_args=(-p 16 -o 64 -j 8 -q 4)
 
 class_for_graph() {
   case "$1" in
@@ -112,8 +109,8 @@ prepare_graph_inputs() {
 macro_for_kernel_graph() {
   local kernel="$1"
   local class="$2"
-  local macro
 
+  local macro
   macro="$(printf '%s' "${class}" | tr '[:lower:]' '[:upper:]')"
   if [[ "${kernel}" == "tc" ]]; then
     macro="${macro}U"
@@ -163,20 +160,24 @@ run_variant() {
 run_case() {
   local kernel="$1"
   local graph="$2"
-  local class="$3"
-  local graph_suffix="$4"
-  local macro="$5"
-  local trials="$6"
+  local trials="$3"
 
-  local graph_path="benchmark/graphs/snap/${graph}${graph_suffix}"
+  local class
+  local graph_suffix
+  local macro
+  local graph_path
   local base_bin="${kernel}"
   local omp_bin="${kernel}-omp"
   local swpf_bin="${kernel}-swpf"
   local tpf_bin="${kernel}_tpf"
-  local compile_flags="-std=c++11 -pthread -O3 -Wall -w"
   local fixed_source=""
   local -a source_args=()
   local -a common_args=()
+
+  class="$(class_for_graph "${graph}")"
+  graph_suffix="$(graph_suffix_for_kernel "${kernel}")"
+  macro="$(macro_for_kernel_graph "${kernel}" "${class}")"
+  graph_path="benchmark/graphs/snap/${graph}${graph_suffix}"
 
   if [[ "${kernel}" == "tc" ]]; then
     trials=1
@@ -185,7 +186,7 @@ run_case() {
   echo
   echo "=== ${kernel} on ${graph} (${class}) ==="
 
-  g++ ${compile_flags} "src/${kernel}.cc" -o "${base_bin}"
+  g++ "${compile_flags[@]}" "src/${kernel}.cc" -o "${base_bin}"
   if kernel_uses_source "${kernel}" && [[ "${fixed_source_enabled}" != "0" ]]; then
     fixed_source="$(detect_source "${base_bin}" "${graph_path}")"
     source_args=(-r "${fixed_source}")
@@ -197,34 +198,32 @@ run_case() {
     "./${base_bin}" "${common_args[@]}"
   rm -f "${base_bin}"
 
-  g++ ${compile_flags} -fopenmp -DOMP -DNT=2 "src/${kernel}.cc" -o "${omp_bin}"
+  g++ "${compile_flags[@]}" -fopenmp -DOMP -DNT=2 "src/${kernel}.cc" -o "${omp_bin}"
   run_variant "${smt_core0},${smt_core1}" "${out_dir}/${kernel}-${graph}-homp.txt" \
     "./${omp_bin}" "${common_args[@]}"
   rm -f "${omp_bin}"
 
-  g++ ${compile_flags} -DSWPF "src/${kernel}.cc" -o "${swpf_bin}"
+  g++ "${compile_flags[@]}" -DSWPF "src/${kernel}.cc" -o "${swpf_bin}"
   run_variant "${smt_core0}" "${out_dir}/${kernel}-${graph}-swpf.txt" \
     "./${swpf_bin}" "${common_args[@]}"
   rm -f "${swpf_bin}"
 
-  g++ ${compile_flags} -DTUNING -DHTPF "-D${macro}" "src/${kernel}_tpf.cc" -o "${tpf_bin}"
+  g++ "${compile_flags[@]}" -DTUNING -DHTPF "-D${macro}" "src/${kernel}_tpf.cc" -o "${tpf_bin}"
   run_variant "${smt_core0},${smt_core1}" "${out_dir}/${kernel}-${graph}-htpf.txt" \
-    "./${tpf_bin}" "${common_args[@]}" -p 16 -o 64 -j 8 -q 4
+    "./${tpf_bin}" "${common_args[@]}" "${htpf_args[@]}"
   rm -f "${tpf_bin}"
 }
 
 mkdir -p "${out_dir}"
 ln -sfn "runs/${timestamp}" "${out_root}/latest"
+echo "SNAP GAP run: repeat=${repeat} out=${out_dir}"
 prepare_graph_inputs
 
 cd "${gap_dir}"
 
 for kernel in "${kernels[@]}"; do
   for graph in "${graphs[@]}"; do
-    class="$(class_for_graph "${graph}")"
-    suffix="$(graph_suffix_for_kernel "${kernel}")"
-    macro="$(macro_for_kernel_graph "${kernel}" "${class}")"
-    run_case "${kernel}" "${graph}" "${class}" "${suffix}" "${macro}" "${repeat}"
+    run_case "${kernel}" "${graph}" "${repeat}"
   done
 done
 

@@ -19,3 +19,4 @@ gap/benchmark/*
 !scripts/
 scripts/*
 !scripts/run_snap_gap_experiments.sh
+!scripts/run_test.sh

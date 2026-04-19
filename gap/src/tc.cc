@@ -55,6 +55,20 @@ graph, we use the heuristic in WorthRelabelling.
 
 using namespace std;
 
+#if defined(GT_FORCE_OMP_FALLBACK)
+#define GT_TC_PRAGMA _Pragma("omp parallel for reduction(+ : total) schedule(dynamic, 64)")
+#elif defined(GHOSTPF) && defined(GT_WEB_STANFORD)
+#define GT_TC_PRAGMA _Pragma("ghost_threading sync_frequency(60) skip_iter(1) serial_max_threshold(80) serial_min_threshold(55) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_WEB_GOOGLE)
+#define GT_TC_PRAGMA _Pragma("ghost_threading sync_frequency(20) skip_iter(7) serial_max_threshold(160) serial_min_threshold(156) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_AMAZON0312)
+#define GT_TC_PRAGMA _Pragma("ghost_threading sync_frequency(1) skip_iter(3) serial_max_threshold(13) serial_min_threshold(8) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_ROADNET_PA)
+#define GT_TC_PRAGMA _Pragma("ghost_threading sync_frequency(60) skip_iter(20) serial_max_threshold(40) serial_min_threshold(32) accurate_sync(disable)")
+#else
+#define GT_TC_PRAGMA
+#endif
+
 // #define INNER_COUNT 
 // #define INNER_MOST
 
@@ -72,7 +86,11 @@ uint64_t max_count;
 
 size_t OrderedCount(const Graph &g) {
   size_t total = 0;
+  #if defined(GHOSTPF)
+  GT_TC_PRAGMA
+  #else
   #pragma omp parallel for reduction(+ : total) schedule(dynamic, 64)
+  #endif
   for (NodeID u=0; u < g.num_nodes(); u++) { 
     #if defined(INNER_COUNT) && !defined(INNER_MOST)
     uint64_t count = 0; 
@@ -89,11 +107,17 @@ size_t OrderedCount(const Graph &g) {
         g.out_neigh(*(v + 32)).prefetch_begin(); 
       }
       #endif 
+      #if defined(GHOSTPF)
+      g.out_neigh(*v).prefetch_begin();
+      #endif
       auto it = g.out_neigh(*v).begin(); // 297.3, 26.8% 
       // firstly load *it 45.68, 48% 
       for (NodeID w : g.out_neigh(u)) {
         if (w > *v)
           break;
+        #if defined(GHOSTPF)
+        __builtin_prefetch(it);
+        #endif
         while (*it < w) // re-load *it 11, 11%
           it++;
         if (w == *it)
@@ -229,3 +253,5 @@ int main(int argc, char* argv[]) {
 
   return 0;
 }
+
+#undef GT_TC_PRAGMA

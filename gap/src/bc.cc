@@ -51,6 +51,23 @@ using namespace std;
 typedef float ScoreT;
 typedef double CountT;
 
+#if defined(GHOSTPF) && defined(GT_WEB_STANFORD)
+#define GT_BC_PBFS_PRAGMA _Pragma("ghost_threading sync_frequency(200) skip_iter(1) serial_max_threshold(80) serial_min_threshold(50) accurate_sync(disable)")
+#define GT_BC_BACK_PRAGMA _Pragma("ghost_threading sync_frequency(200) skip_iter(1) serial_max_threshold(80) serial_min_threshold(50) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_WEB_GOOGLE)
+#define GT_BC_PBFS_PRAGMA _Pragma("ghost_threading sync_frequency(400) skip_iter(1) serial_max_threshold(300) serial_min_threshold(295) accurate_sync(disable)")
+#define GT_BC_BACK_PRAGMA _Pragma("ghost_threading sync_frequency(400) skip_iter(1) serial_max_threshold(300) serial_min_threshold(295) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_AMAZON0312)
+#define GT_BC_PBFS_PRAGMA _Pragma("ghost_threading sync_frequency(2) skip_iter(16) serial_max_threshold(60) serial_min_threshold(59) accurate_sync(disable)")
+#define GT_BC_BACK_PRAGMA _Pragma("ghost_threading sync_frequency(2) skip_iter(16) serial_max_threshold(60) serial_min_threshold(59) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_ROADNET_PA)
+#define GT_BC_PBFS_PRAGMA _Pragma("ghost_threading sync_frequency(500) skip_iter(1) serial_max_threshold(80) serial_min_threshold(50) accurate_sync(disable)")
+#define GT_BC_BACK_PRAGMA _Pragma("ghost_threading sync_frequency(500) skip_iter(1) serial_max_threshold(80) serial_min_threshold(50) accurate_sync(disable)")
+#else
+#define GT_BC_PBFS_PRAGMA
+#define GT_BC_BACK_PRAGMA
+#endif
+
 #ifdef INNER_COUNT
 #define BOUNDARY 64 
 
@@ -78,7 +95,9 @@ void PBFS(const Graph &g, NodeID source, pvector<CountT> &path_counts,
   depth_index.push_back(queue.begin());
   queue.slide_window();
   const NodeID* g_out_start = g.out_neigh(0).begin();
+  #if !defined(GHOSTPF)
   #pragma omp parallel
+  #endif
   {
     NodeID depth = 0;
     QueueBuffer<NodeID> lqueue(queue);
@@ -89,7 +108,11 @@ void PBFS(const Graph &g, NodeID source, pvector<CountT> &path_counts,
       // {
       //   loop_timer.Start(); 
       // }
+      #if defined(GHOSTPF)
+      GT_BC_PBFS_PRAGMA
+      #else
       #pragma omp for schedule(dynamic, 64) nowait
+      #endif
       for (auto q_iter = queue.begin(); q_iter < queue.end(); q_iter++) { // iter per invoc 16777216
         NodeID u = *q_iter;
         #ifdef INNER_COUNT
@@ -98,7 +121,12 @@ void PBFS(const Graph &g, NodeID source, pvector<CountT> &path_counts,
         for (NodeID* v = g.out_neigh(u).begin(); v < g.out_neigh(u).end(); v++) { // iter per invoc 32 
         // for (NodeID &v : g.out_neigh(u)) { // iter per invoc 32 
           // v: 20 cpi, 20%; depths[v] 62 cpi, 58% 
-          #ifdef SWPF
+          #if defined(GHOSTPF)
+          if (v + 64 < g.out_neigh(u).end()) {
+            __builtin_prefetch(v + 64);
+            __builtin_prefetch(&depths[*(v + 32)]);
+          }
+          #elif defined(SWPF)
           if (v + 64 < g.out_neigh(u).end()) {
             __builtin_prefetch(v + 64); 
             __builtin_prefetch(&depths[*(v + 32)]); 
@@ -174,13 +202,28 @@ pvector<ScoreT> Brandes(const Graph &g, SourcePicker<Graph> &sp,
     t.Start();
     for (int d=depth_index.size()-2; d >= 0; d--) {
       // const auto start = chrono::high_resolution_clock::now();
+      #if defined(GHOSTPF)
+      GT_BC_BACK_PRAGMA
+      #else
       #pragma omp parallel for schedule(dynamic, 64)
+      #endif
       for (auto it = depth_index[d]; it < depth_index[d+1]; it++) { // 16777216 iter per invoc 
         NodeID u = *it;
         ScoreT delta_u = 0;
+        #if defined(GHOSTPF)
+        g.out_neigh(u).prefetch_end();
+        #endif
         for (NodeID *v = g.out_neigh(u).begin(); v < g.out_neigh(u).end(); v++) {
         // for (NodeID &v : g.out_neigh(u)) {
-          #ifdef SWPF
+          #if defined(GHOSTPF)
+          if (v + 64 < g.out_neigh(u).end()) {
+            __builtin_prefetch(v + 64);
+          }
+          if (succ.get_bit(v - g_out_start)) {
+            __builtin_prefetch(&path_counts[*v]);
+            __builtin_prefetch(&deltas[*v]);
+          }
+          #elif defined(SWPF)
           if (v + 64 < g.out_neigh(u).end()) {
             __builtin_prefetch(v + 64); 
             __builtin_prefetch(&path_counts[*(v+32)]); 
@@ -329,3 +372,6 @@ int main(int argc, char* argv[]) {
   #endif 
   return 0;
 }
+
+#undef GT_BC_PBFS_PRAGMA
+#undef GT_BC_BACK_PRAGMA

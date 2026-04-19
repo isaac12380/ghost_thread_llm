@@ -35,7 +35,72 @@ warmup_runs="${SNAP_GAP_WARMUP_RUNS:-1}"
 declare -a kernels=("bfs" "bc" "cc" "pr" "sssp" "tc")
 declare -a graphs=("web-Stanford" "web-Google" "amazon0312" "roadNet-PA")
 compile_flags=(-std=c++11 -pthread -O3 -Wall -w)
-htpf_args=(-p 16 -o 64 -j 8 -q 4)
+
+# Default HTPF CLI args used when we do not have a workload-specific setting.
+# Note: in these binaries, -q is interpreted as (serialize_threshold - unserialize_threshold).
+default_htpf_args=(-p 16 -o 64 -j 8 -q 4)
+
+htpf_args_for_case() {
+  local kernel="$1"
+  local graph="$2"
+  local class="$3"
+
+  case "${kernel}:${graph}" in
+    # Second-round tuning based on 20260418-171528 -> 20260420-001859:
+    # keep the larger bfs settings where they helped, but revert web-Google.
+    bfs:web-Stanford|bfs:amazon0312|bfs:roadNet-PA)
+      echo "-p 500 -o 300 -j 128 -q 10"
+      ;;
+    bfs:web-Google)
+      printf '%s ' "${default_htpf_args[@]}"
+      echo
+      ;;
+
+    # cc improves on Stanford/Google with the WEB defaults, but amazon0312 regressed.
+    cc:web-Stanford|cc:web-Google)
+      echo "-p 800 -o 150 -j 130 -q 50"
+      ;;
+    cc:amazon0312|cc:roadNet-PA)
+      printf '%s ' "${default_htpf_args[@]}"
+      echo
+      ;;
+
+    # sssp remains the worst line item after two rounds, so push the larger WEB
+    # settings a bit further on the heavy web-like graphs.
+    sssp:web-Stanford|sssp:amazon0312)
+      echo "-p 14 -o 160 -j 64 -q 10"
+      ;;
+    sssp:web-Google|sssp:roadNet-PA)
+      printf '%s ' "${default_htpf_args[@]}"
+      echo
+      ;;
+
+    # pr still regresses broadly with the default 16/64/8/4. Use a looser outer
+    # sync policy to reduce coordination overhead and let the PF thread jump ahead.
+    pr:web-Stanford|pr:web-Google|pr:amazon0312|pr:roadNet-PA)
+      echo "-p 64 -o 256 -j 64 -q 32"
+      ;;
+
+    # tc ROADU path has an explicit !TUNING default.
+    tc:roadNet-PA)
+      echo "-p 8 -o 23 -j 7 -q 5"
+      ;;
+    # tc web workloads are still clearly below baseline with the default policy.
+    # Try a wider sync window without perturbing amazon0312, which already wins.
+    tc:web-Stanford|tc:web-Google)
+      echo "-p 32 -o 128 -j 16 -q 16"
+      ;;
+
+    *)
+      case "${kernel}:${class}" in
+        *)
+          printf '%s ' "${default_htpf_args[@]}"
+          echo
+          ;;
+      esac
+      ;;
+  esac
+}
 
 class_for_graph() {
   case "$1" in
@@ -170,6 +235,8 @@ run_case() {
   local omp_bin="${kernel}-omp"
   local swpf_bin="${kernel}-swpf"
   local tpf_bin="${kernel}_tpf"
+  local htpf_arg_str=""
+  local -a htpf_args=()
   local fixed_source=""
   local -a source_args=()
   local -a common_args=()
@@ -185,6 +252,10 @@ run_case() {
 
   echo
   echo "=== ${kernel} on ${graph} (${class}) ==="
+  htpf_arg_str="$(htpf_args_for_case "${kernel}" "${graph}" "${class}")"
+  # shellcheck disable=SC2206
+  htpf_args=(${htpf_arg_str})
+  echo "HTPF args: ${htpf_arg_str}"
 
   g++ "${compile_flags[@]}" "src/${kernel}.cc" -o "${base_bin}"
   if kernel_uses_source "${kernel}" && [[ "${fixed_source_enabled}" != "0" ]]; then

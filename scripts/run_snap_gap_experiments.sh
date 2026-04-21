@@ -13,6 +13,7 @@ Env:
   SNAP_GAP_FIXED_SOURCE=1   Reuse one detected source for bfs/bc/sssp
   SNAP_GAP_WARMUP_RUNS=1    Warm-up runs before the measured run
   SNAP_GAP_RUN_NAME=<tag>   Override output directory name
+  SNAP_GAP_SOURCE_POLICY=empirical-htpf|default
 EOF
   exit 1
 fi
@@ -31,73 +32,57 @@ timestamp="${SNAP_GAP_RUN_NAME:-$(date +%Y%m%d-%H%M%S)}"
 out_dir="${out_root}/runs/${timestamp}"
 fixed_source_enabled="${SNAP_GAP_FIXED_SOURCE:-1}"
 warmup_runs="${SNAP_GAP_WARMUP_RUNS:-1}"
+source_policy="${SNAP_GAP_SOURCE_POLICY:-empirical-htpf}"
 
 declare -a kernels=("bfs" "bc" "cc" "pr" "sssp" "tc")
 declare -a graphs=("web-Stanford" "web-Google" "amazon0312" "roadNet-PA")
 compile_flags=(-std=c++11 -pthread -O3 -Wall -w)
 
 # Default HTPF CLI args used when we do not have a workload-specific setting.
-# Note: in these binaries, -q is interpreted as (serialize_threshold - unserialize_threshold).
+# Note: in these binaries, -q is interpreted as
+# (serialize_threshold - unserialize_threshold).
 default_htpf_args=(-p 16 -o 64 -j 8 -q 4)
 
 htpf_args_for_case() {
   local kernel="$1"
   local graph="$2"
-  local class="$3"
 
   case "${kernel}:${graph}" in
-    # Second-round tuning based on 20260418-171528 -> 20260420-001859:
-    # keep the larger bfs settings where they helped, but revert web-Google.
-    bfs:web-Stanford|bfs:amazon0312|bfs:roadNet-PA)
-      echo "-p 500 -o 300 -j 128 -q 10"
-      ;;
-    bfs:web-Google)
-      printf '%s ' "${default_htpf_args[@]}"
-      echo
-      ;;
+    # Imported from the best known tuning results in this repo:
+    # - gap/output/snap/tuned/htpf_tuning_best.csv
+    bfs:web-Stanford) echo "-p 1400 -o 800 -j 0 -q 30" ;;
+    bfs:web-Google)   echo "-p 16 -o 64 -j 8 -q 4" ;;
+    bfs:amazon0312)   echo "-p 1400 -o 800 -j 64 -q 15" ;;
+    bfs:roadNet-PA)   echo "-p 120 -o 1000 -j 32 -q 10" ;;
 
-    # cc improves on Stanford/Google with the WEB defaults, but amazon0312 regressed.
-    cc:web-Stanford|cc:web-Google)
-      echo "-p 800 -o 150 -j 130 -q 50"
-      ;;
-    cc:amazon0312|cc:roadNet-PA)
-      printf '%s ' "${default_htpf_args[@]}"
-      echo
-      ;;
+    bc:web-Stanford)  echo "-p 200 -o 600 -j 0 -q 10" ;;
+    bc:web-Google)    echo "-p 100 -o 600 -j 0 -q 10" ;;
+    bc:amazon0312)    echo "-p 160 -o 600 -j 32 -q 10" ;;
+    bc:roadNet-PA)    echo "-p 500 -o 80 -j 0 -q 10" ;;
 
-    # sssp remains the worst line item after two rounds, so push the larger WEB
-    # settings a bit further on the heavy web-like graphs.
-    sssp:web-Stanford|sssp:amazon0312)
-      echo "-p 14 -o 160 -j 64 -q 10"
-      ;;
-    sssp:web-Google|sssp:roadNet-PA)
-      printf '%s ' "${default_htpf_args[@]}"
-      echo
-      ;;
+    cc:web-Stanford)  echo "-p 800 -o 1600 -j 200 -q 50" ;;
+    cc:web-Google)    echo "-p 800 -o 600 -j 400 -q 50" ;;
+    cc:amazon0312)    echo "-p 18 -o 18 -j 30 -q 18" ;;
+    cc:roadNet-PA)    echo "-p 800 -o 300 -j 180 -q 50" ;;
 
-    # pr still regresses broadly with the default 16/64/8/4. Use a looser outer
-    # sync policy to reduce coordination overhead and let the PF thread jump ahead.
-    pr:web-Stanford|pr:web-Google|pr:amazon0312|pr:roadNet-PA)
-      echo "-p 64 -o 256 -j 64 -q 32"
-      ;;
+    pr:web-Stanford)  echo "-p 20 -o 140 -j 0 -q 5" ;;
+    pr:web-Google)    echo "-p 40 -o 50 -j 60 -q 5" ;;
+    pr:amazon0312)    echo "-p 16 -o 64 -j 8 -q 4" ;;
+    pr:roadNet-PA)    echo "-p 20 -o 140 -j 60 -q 5" ;;
 
-    # tc ROADU path has an explicit !TUNING default.
-    tc:roadNet-PA)
-      echo "-p 8 -o 23 -j 7 -q 5"
-      ;;
-    # tc web workloads are still clearly below baseline with the default policy.
-    # Try a wider sync window without perturbing amazon0312, which already wins.
-    tc:web-Stanford|tc:web-Google)
-      echo "-p 32 -o 128 -j 16 -q 16"
-      ;;
+    sssp:web-Stanford) echo "-p 16 -o 64 -j 8 -q 4" ;;
+    sssp:web-Google)   echo "-p 26 -o 32 -j 18 -q 7" ;;
+    sssp:amazon0312)   echo "-p 600 -o 120 -j 32 -q 10" ;;
+    sssp:roadNet-PA)   echo "-p 1000 -o 120 -j 0 -q 10" ;;
+
+    tc:web-Stanford)  echo "-p 16 -o 64 -j 0 -q 2" ;;
+    tc:web-Google)    echo "-p 10 -o 80 -j 0 -q 8" ;;
+    tc:amazon0312)    echo "-p 20 -o 80 -j 14 -q 8" ;;
+    tc:roadNet-PA)    echo "-p 60 -o 160 -j 7 -q 50" ;;
 
     *)
-      case "${kernel}:${class}" in
-        *)
-          printf '%s ' "${default_htpf_args[@]}"
-          echo
-          ;;
-      esac
+      printf '%s ' "${default_htpf_args[@]}"
+      echo
       ;;
   esac
 }
@@ -201,6 +186,47 @@ detect_source() {
   printf '%s\n' "${source}"
 }
 
+preferred_source_for_case() {
+  local kernel="$1"
+  local graph="$2"
+
+  case "${kernel}:${graph}" in
+    # Only include sources that were validated by direct source sweep.
+    bfs:web-Google)   echo "685695" ;;
+    bc:web-Google)    echo "685695" ;;
+    bc:web-Stanford)  echo "266154" ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+choose_source() {
+  local kernel="$1"
+  local graph="$2"
+  local bin="$3"
+  local graph_path="$4"
+  local source=""
+
+  case "${source_policy}" in
+    empirical-htpf)
+      if source="$(preferred_source_for_case "${kernel}" "${graph}")"; then
+        echo "Using empirical HTPF-aware source ${source} for ${kernel}-${graph}" >&2
+        printf '%s\n' "${source}"
+        return 0
+      fi
+      ;;
+    default)
+      ;;
+    *)
+      echo "Unsupported SNAP_GAP_SOURCE_POLICY=${source_policy}" >&2
+      exit 1
+      ;;
+  esac
+
+  detect_source "${bin}" "${graph_path}"
+}
+
 kernel_uses_source() {
   case "$1" in
     bfs|bc|sssp) return 0 ;;
@@ -220,6 +246,65 @@ run_variant() {
   done
 
   taskset -c "${cpu_list}" "${cmd[@]}" > "${logfile}" 2>&1
+}
+
+extract_average_time() {
+  local logfile="$1"
+
+  awk '/^Average Time:/{print $3; exit}' "${logfile}"
+}
+
+emit_result_summary() {
+  local runtime_csv="${out_dir}/runtime.csv"
+  local speedup_csv="${out_dir}/speedup.csv"
+  local kernel
+  local graph
+  local workload
+  local baseline_log
+  local homp_log
+  local swpf_log
+  local htpf_log
+  local baseline_time
+  local homp_time
+  local swpf_time
+  local htpf_time
+  local homp_speedup
+  local swpf_speedup
+  local htpf_speedup
+
+  printf 'workload,baseline,homp,swpf,htpf\n' > "${runtime_csv}"
+  printf 'workload,baseline,homp,swpf,htpf\n' > "${speedup_csv}"
+
+  for kernel in "${kernels[@]}"; do
+    for graph in "${graphs[@]}"; do
+      workload="${kernel}-${graph}"
+      baseline_log="${out_dir}/${workload}-baseline.txt"
+      homp_log="${out_dir}/${workload}-homp.txt"
+      swpf_log="${out_dir}/${workload}-swpf.txt"
+      htpf_log="${out_dir}/${workload}-htpf.txt"
+
+      baseline_time="$(extract_average_time "${baseline_log}")"
+      homp_time="$(extract_average_time "${homp_log}")"
+      swpf_time="$(extract_average_time "${swpf_log}")"
+      htpf_time="$(extract_average_time "${htpf_log}")"
+
+      if [[ -z "${baseline_time}" || -z "${homp_time}" || -z "${swpf_time}" || -z "${htpf_time}" ]]; then
+        echo "Skipping summary for ${workload}: missing Average Time in one or more logs" >&2
+        continue
+      fi
+
+      homp_speedup="$(awk -v b="${baseline_time}" -v t="${homp_time}" 'BEGIN{printf "%.10f", b / t}')"
+      swpf_speedup="$(awk -v b="${baseline_time}" -v t="${swpf_time}" 'BEGIN{printf "%.10f", b / t}')"
+      htpf_speedup="$(awk -v b="${baseline_time}" -v t="${htpf_time}" 'BEGIN{printf "%.10f", b / t}')"
+
+      printf '%s,%s,%s,%s,%s\n' \
+        "${workload}" "${baseline_time}" "${homp_time}" "${swpf_time}" "${htpf_time}" \
+        >> "${runtime_csv}"
+      printf '%s,1.0000000000,%s,%s,%s\n' \
+        "${workload}" "${homp_speedup}" "${swpf_speedup}" "${htpf_speedup}" \
+        >> "${speedup_csv}"
+    done
+  done
 }
 
 run_case() {
@@ -252,14 +337,14 @@ run_case() {
 
   echo
   echo "=== ${kernel} on ${graph} (${class}) ==="
-  htpf_arg_str="$(htpf_args_for_case "${kernel}" "${graph}" "${class}")"
+  htpf_arg_str="$(htpf_args_for_case "${kernel}" "${graph}")"
   # shellcheck disable=SC2206
   htpf_args=(${htpf_arg_str})
   echo "HTPF args: ${htpf_arg_str}"
 
   g++ "${compile_flags[@]}" "src/${kernel}.cc" -o "${base_bin}"
   if kernel_uses_source "${kernel}" && [[ "${fixed_source_enabled}" != "0" ]]; then
-    fixed_source="$(detect_source "${base_bin}" "${graph_path}")"
+    fixed_source="$(choose_source "${kernel}" "${graph}" "${base_bin}" "${graph_path}")"
     source_args=(-r "${fixed_source}")
     printf 'source=%s\n' "${fixed_source}" > "${out_dir}/${kernel}-${graph}-source.txt"
     echo "Using fixed ${kernel} source ${fixed_source}"
@@ -298,6 +383,10 @@ for kernel in "${kernels[@]}"; do
   done
 done
 
+emit_result_summary
+
 echo
 echo "Finished. Logs are in ${out_dir}"
 echo "Latest symlink: ${out_root}/latest"
+echo "Runtime summary: ${out_dir}/runtime.csv"
+echo "Speedup summary: ${out_dir}/speedup.csv"

@@ -11,6 +11,7 @@ Build or run the compiler-driven BFS demo with GhostThreading clang++.
   --mode <run|compile-only|emit-ir-only>   Default: run
   --graph <name>                           Default: web-Stanford
   --repeat <n>                             Default: 1
+  --snap-run <dir>                         Reuse source/repeat from one SNAP run dir
   --cpu-list <list>                        Optional taskset list, e.g. 0,48
   --output-tag <tag>                       Default: timestamp
   --compiler <path>                        Override GhostThreading clang++
@@ -42,6 +43,9 @@ compiler="${GT_CLANG:-${default_compiler}}"
 output_tag="$(date +%Y%m%d-%H%M%S)"
 cpu_list=""
 fixed_source=""
+source_overridden=0
+repeat_overridden=0
+snap_run_dir=""
 source_file="${GT_SOURCE_FILE:-${default_source}}"
 
 while [[ $# -gt 0 ]]; do
@@ -56,6 +60,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --repeat)
       repeat="${2:-}"
+      repeat_overridden=1
+      shift 2
+      ;;
+    --snap-run)
+      snap_run_dir="${2:-}"
       shift 2
       ;;
     --compiler)
@@ -72,6 +81,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --source)
       fixed_source="${2:-}"
+      source_overridden=1
       shift 2
       ;;
     --help|-h)
@@ -109,6 +119,26 @@ graph_path="${gap_dir}/benchmark/graphs/small/${graph}.sg"
 if [[ ! -f "${graph_path}" ]]; then
   echo "Small graph not found: ${graph_path}" >&2
   exit 1
+fi
+
+if [[ -n "${snap_run_dir}" ]]; then
+  snap_source_file="${snap_run_dir}/bfs-${graph}-source.txt"
+  snap_baseline_log="${snap_run_dir}/bfs-${graph}-baseline.txt"
+
+  if [[ "${source_overridden}" == "0" && -f "${snap_source_file}" ]]; then
+    fixed_source="$(sed -n 's/^source=//p' "${snap_source_file}" | head -n 1)"
+  fi
+
+  if [[ "${repeat_overridden}" == "0" && -f "${snap_baseline_log}" ]]; then
+    if command -v rg >/dev/null 2>&1; then
+      snap_repeat="$(rg -c '^Trial Time:' "${snap_baseline_log}")"
+    else
+      snap_repeat="$(grep -c '^Trial Time:' "${snap_baseline_log}")"
+    fi
+    if [[ -n "${snap_repeat}" && "${snap_repeat}" != "0" ]]; then
+      repeat="${snap_repeat}"
+    fi
+  fi
 fi
 
 if [[ ! -f "${source_file}" ]]; then
@@ -239,6 +269,10 @@ fi
 echo "Compiler GT GAP: ${mode} ${graph}"
 echo "  compiler: ${compiler}"
 echo "  source:   ${source_file}"
+if [[ -n "${fixed_source}" ]]; then
+  echo "  start:    ${fixed_source}"
+fi
+echo "  repeat:   ${repeat}"
 echo "  output:   ${out_dir}"
 
 if [[ "${GT_DEBUG:-0}" != "0" ]]; then

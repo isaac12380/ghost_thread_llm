@@ -50,6 +50,18 @@ them in the parent array as negative numbers. Thus, the encoding of parent is:
 
 using namespace std;
 
+#if defined(GHOSTPF) && defined(GT_WEB_STANFORD)
+#define GT_BFS_TD_PRAGMA _Pragma("ghost_threading sync_frequency(100) skip_iter(64) serial_max_threshold(300) serial_min_threshold(240) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_WEB_GOOGLE)
+#define GT_BFS_TD_PRAGMA _Pragma("ghost_threading sync_frequency(200) skip_iter(64) serial_max_threshold(300) serial_min_threshold(290) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_AMAZON0312)
+#define GT_BFS_TD_PRAGMA _Pragma("ghost_threading sync_frequency(100) skip_iter(64) serial_max_threshold(800) serial_min_threshold(770) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_ROADNET_PA)
+#define GT_BFS_TD_PRAGMA _Pragma("ghost_threading sync_frequency(200) skip_iter(1) serial_max_threshold(300) serial_min_threshold(290) accurate_sync(disable)")
+#else
+#define GT_BFS_TD_PRAGMA
+#endif
+
 #ifdef INNER_COUNT
 #define BOUNDARY 64 
 
@@ -107,19 +119,33 @@ int64_t BUStep(const Graph &g, pvector<NodeID> &parent, Bitmap &front,
 int64_t TDStep(const Graph &g, pvector<NodeID> &parent,
                SlidingQueue<NodeID> &queue) { 
   int64_t scout_count = 0;
+  #if !defined(GHOSTPF)
   #pragma omp parallel
+  #endif
   {
     QueueBuffer<NodeID> lqueue(queue);
+    #if defined(GHOSTPF)
+    GT_BFS_TD_PRAGMA
+    #else
     #pragma omp for reduction(+ : scout_count) nowait
+    #endif
     for (auto q_iter = queue.begin(); q_iter < queue.end(); q_iter++) { 
       NodeID u = *q_iter;
+      #if defined(GHOSTPF)
+      g.out_neigh(u).prefetch_end();
+      #endif
       for (NodeID* v = g.out_neigh(u).begin(); v < g.out_neigh(u).end(); v++) { 
       // for (NodeID v : g.out_neigh(u)) { 
-        #ifdef SWPF
-          if (v + 64 < g.out_neigh(u).end()) {
-            __builtin_prefetch(v + 64); 
-            __builtin_prefetch(&parent[*(v+32)]); 
-          }
+        #if defined(GHOSTPF)
+        if (v + 64 < g.out_neigh(u).end()) {
+          __builtin_prefetch(v + 64);
+          __builtin_prefetch(&parent[*(v + 32)]);
+        }
+        #elif defined(SWPF)
+        if (v + 64 < g.out_neigh(u).end()) {
+          __builtin_prefetch(v + 64); 
+          __builtin_prefetch(&parent[*(v+32)]); 
+        }
         #endif 
         NodeID curr_val = parent[*v]; 
         if (curr_val < 0) {
@@ -244,6 +270,8 @@ void PrintBFSStats(const Graph &g, const pvector<NodeID> &bfs_tree) {
   cout << "BFS Tree has " << tree_size << " nodes and ";
   cout << n_edges << " edges" << endl;
 }
+
+#undef GT_BFS_TD_PRAGMA
 
 
 // BFS verifier does a serial BFS from same source and asserts:

@@ -47,6 +47,20 @@ which restructures and extends the Shiloach-Vishkin algorithm [2].
 
 using namespace std;
 
+#if defined(GT_FORCE_OMP_FALLBACK)
+#define GT_CC_PRAGMA _Pragma("omp parallel for schedule(dynamic, 16384)")
+#elif defined(GHOSTPF) && defined(GT_WEB_STANFORD)
+#define GT_CC_PRAGMA _Pragma("ghost_threading sync_frequency(400) skip_iter(90) serial_max_threshold(400) serial_min_threshold(350) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_WEB_GOOGLE)
+#define GT_CC_PRAGMA _Pragma("ghost_threading sync_frequency(1600) skip_iter(90) serial_max_threshold(150) serial_min_threshold(125) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_AMAZON0312)
+#define GT_CC_PRAGMA _Pragma("ghost_threading sync_frequency(800) skip_iter(45) serial_max_threshold(300) serial_min_threshold(250) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_ROADNET_PA)
+#define GT_CC_PRAGMA _Pragma("ghost_threading sync_frequency(800) skip_iter(400) serial_max_threshold(150) serial_min_threshold(100) accurate_sync(disable)")
+#else
+#define GT_CC_PRAGMA
+#endif
+
 #ifdef INNER_COUNT
 #define BOUNDARY 64 
 
@@ -125,11 +139,20 @@ pvector<NodeID> Afforest(const Graph &g, bool logging_enabled = false,
     #ifdef INNER_COUNT
     uint64_t count = 0; 
     #endif 
+  #if defined(GHOSTPF)
+    GT_CC_PRAGMA
+  #else
   #pragma omp parallel for schedule(dynamic,16384)
+  #endif
     for (NodeID u = 0; u < g.num_nodes(); u++) { 
       for (NodeID* v = g.out_neigh(u, r).begin(); v < g.out_neigh(u, r).end(); v++) { 
       // for (NodeID v : g.out_neigh(u, r)) { 
-        #ifdef SWPF
+        #if defined(GHOSTPF)
+        if (v + 64 < g.out_neigh(u, r).end()) {
+          __builtin_prefetch(v + 64);
+          __builtin_prefetch(&comp[*(v + 32)]);
+        }
+        #elif defined(SWPF)
         if (v + 64 < g.out_neigh(u, r).end()) {
           __builtin_prefetch((v + 64)); // for web 
           __builtin_prefetch(&comp[*(v + 32)]); 
@@ -165,8 +188,15 @@ pvector<NodeID> Afforest(const Graph &g, bool logging_enabled = false,
       if (comp[u] == c)
         continue;
       // Skip over part of neighborhood (determined by neighbor_rounds)
-      for (NodeID v : g.out_neigh(u, neighbor_rounds)) {
-        Link(u, v, comp);
+      for (NodeID* v = g.out_neigh(u, neighbor_rounds).begin();
+           v < g.out_neigh(u, neighbor_rounds).end(); v++) {
+        #if defined(GHOSTPF)
+        if (v + 64 < g.out_neigh(u, neighbor_rounds).end()) {
+          __builtin_prefetch(v + 64);
+          __builtin_prefetch(&comp[*(v + 32)]);
+        }
+        #endif
+        Link(u, *v, comp);
       }
     }
   } else {
@@ -174,12 +204,25 @@ pvector<NodeID> Afforest(const Graph &g, bool logging_enabled = false,
     for (NodeID u = 0; u < g.num_nodes(); u++) {
       if (comp[u] == c)
         continue;
-      for (NodeID v : g.out_neigh(u, neighbor_rounds)) {
-        Link(u, v, comp);
+      for (NodeID* v = g.out_neigh(u, neighbor_rounds).begin();
+           v < g.out_neigh(u, neighbor_rounds).end(); v++) {
+        #if defined(GHOSTPF)
+        if (v + 64 < g.out_neigh(u, neighbor_rounds).end()) {
+          __builtin_prefetch(v + 64);
+          __builtin_prefetch(&comp[*(v + 32)]);
+        }
+        #endif
+        Link(u, *v, comp);
       }
       // To support directed graphs, process reverse graph completely
-      for (NodeID v : g.in_neigh(u)) {
-        Link(u, v, comp);
+      for (NodeID* v = g.in_neigh(u).begin(); v < g.in_neigh(u).end(); v++) {
+        #if defined(GHOSTPF)
+        if (v + 64 < g.in_neigh(u).end()) {
+          __builtin_prefetch(v + 64);
+          __builtin_prefetch(&comp[*(v + 32)]);
+        }
+        #endif
+        Link(u, *v, comp);
       }
     }
   }
@@ -280,3 +323,5 @@ int main(int argc, char* argv[]) {
   #endif 
   return 0;
 }
+
+#undef GT_CC_PRAGMA

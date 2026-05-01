@@ -113,6 +113,9 @@ using namespace std;
 
 TimeDiff time_diff; 
 HyperParam_PfT hyper_param; 
+uint64_t sync_too_fast = 0;
+uint64_t sync_too_slow = 0;
+uint64_t sync_serial_end = 0;
 
 void PrefetchThread(const Graph *g) {
   #if defined(URAND) && !defined(TUNING)
@@ -124,6 +127,9 @@ void PrefetchThread(const Graph *g) {
   #else
   HyperParam_PfT hyperparam = hyper_param; 
   #endif 
+  uint64_t local_too_fast = 0;
+  uint64_t local_too_slow = 0;
+  uint64_t local_serial_end = 0;
   bool serialize_flag = false; 
   for (NodeID u=0; u < g->num_nodes(); u++) { 
     for (NodeID v : g->out_neigh(u)) { 
@@ -143,8 +149,24 @@ void PrefetchThread(const Graph *g) {
     }
     if (serialize_flag) 
       asm volatile ("serialize\n\t"); 
-    sync<NodeID>(u, 1, u, false, time_diff, ORDER_READ, serialize_flag, hyperparam); 
+    if (u % hyperparam.sync_frequency == 0 || serialize_flag) {
+      size_t main_counter = time_diff.read_atomic_main(ORDER_READ);
+      if (main_counter >= u) {
+        local_too_slow++;
+        serialize_flag = false;
+        u = static_cast<NodeID>(main_counter + hyperparam.skip_offset);
+      } else if (u - main_counter > hyperparam.serialize_threshold) {
+        local_too_fast++;
+        serialize_flag = true;
+      } else if (u - main_counter < hyperparam.unserialize_threshold) {
+        local_serial_end++;
+        serialize_flag = false;
+      }
+    }
   }
+  sync_too_fast += local_too_fast;
+  sync_too_slow += local_too_slow;
+  sync_serial_end += local_serial_end;
 }
 
 void PrefetchThread_inner(const Graph *g) { // for kron, twitter, and web (although not mem-intensive)
@@ -157,6 +179,9 @@ void PrefetchThread_inner(const Graph *g) { // for kron, twitter, and web (altho
   #else
   HyperParam_PfT hyperparam = hyper_param; 
   #endif 
+  uint64_t local_too_fast = 0;
+  uint64_t local_too_slow = 0;
+  uint64_t local_serial_end = 0;
   bool serialize_flag = false; 
   bool prefetch = true; 
   size_t j = 0; 
@@ -182,12 +207,15 @@ void PrefetchThread_inner(const Graph *g) { // for kron, twitter, and web (altho
           size_t main_j = time_diff.read_atomic_main(ORDER_READ); 
           // time_diff.insert_into_atomic_histogram(main_j, j); 
           if (main_j >= j) {
+            local_too_slow++;
             serialize_flag = false; 
             prefetch = false; 
           } else if (j - main_j > hyper_param.serialize_threshold) {
+            local_too_fast++;
             serialize_flag = true; 
             prefetch = true; 
           } else if (j - main_j < hyper_param.unserialize_threshold) {
+            local_serial_end++;
             serialize_flag = false;
             prefetch = true;  
           } else {
@@ -198,9 +226,17 @@ void PrefetchThread_inner(const Graph *g) { // for kron, twitter, and web (altho
       }
     }
   }
+  sync_too_fast += local_too_fast;
+  sync_too_slow += local_too_slow;
+  sync_serial_end += local_serial_end;
 }
 
 size_t OrderedCount(const Graph &g) {
+  #ifdef HTPF
+  sync_too_fast = 0;
+  sync_too_slow = 0;
+  sync_serial_end = 0;
+  #endif
   size_t total = 0;
   #if defined(HTPF) && !defined(INNER)
   thread PF(PrefetchThread, &g); 
@@ -246,6 +282,11 @@ size_t OrderedCount(const Graph &g) {
   #ifdef HTPF
   PF.join(); 
   #endif 
+  #ifdef HTPF
+  cout << "sync trace counters: too_fast=" << sync_too_fast
+       << " too_slow=" << sync_too_slow
+       << " serial_end=" << sync_serial_end << endl;
+  #endif
   return total;
 }
 

@@ -51,8 +51,20 @@ class SourcePicker { // @profile: TODO
         udist_(g.num_nodes()-1, rng_), g_(g) {}
 
   NodeID PickNext() {
-    if (given_source_ != -1)
+    if (given_source_ != -1) {
+      if ((given_source_ < 0) || (given_source_ >= g_.num_nodes())) {
+        std::cout << "Invalid source vertex: " << given_source_
+                  << " (valid range: 0.." << (g_.num_nodes() - 1) << ")"
+                  << std::endl;
+        std::exit(-6);
+      }
+      if (g_.out_degree(given_source_) == 0) {
+        std::cout << "Invalid source vertex: " << given_source_
+                  << " has zero out-degree" << std::endl;
+        std::exit(-7);
+      }
       return given_source_;
+    }
     NodeID source;
     do {
       source = udist_();

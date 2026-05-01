@@ -69,6 +69,20 @@ const WeightT kDistInf = numeric_limits<WeightT>::max()/2;
 const size_t kMaxBin = numeric_limits<size_t>::max()/2;
 const size_t kBinSizeThreshold = 1000;
 
+#if defined(GT_FORCE_OMP_FALLBACK)
+#define GT_SSSP_PRAGMA _Pragma("omp for nowait schedule(dynamic, 64)")
+#elif defined(GHOSTPF) && defined(GT_WEB_STANFORD)
+#define GT_SSSP_PRAGMA _Pragma("ghost_threading sync_frequency(1000) skip_iter(64) serial_max_threshold(120) serial_min_threshold(115) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_WEB_GOOGLE)
+#define GT_SSSP_PRAGMA _Pragma("ghost_threading sync_frequency(14) skip_iter(18) serial_max_threshold(60) serial_min_threshold(49) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_AMAZON0312)
+#define GT_SSSP_PRAGMA _Pragma("ghost_threading sync_frequency(600) skip_iter(64) serial_max_threshold(120) serial_min_threshold(113) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_ROADNET_PA)
+#define GT_SSSP_PRAGMA _Pragma("ghost_threading sync_frequency(300) skip_iter(32) serial_max_threshold(120) serial_min_threshold(110) accurate_sync(disable)")
+#else
+#define GT_SSSP_PRAGMA
+#endif
+
 #ifdef INNER_COUNT
 #define UPPER_BOUNDARY 1000000+4
 #define LOWER_BOUNDARY 1000000 
@@ -103,7 +117,12 @@ void RelaxEdges(const WGraph &g, NodeID u, WeightT delta,
   #endif 
   // for (WNode wn : g.out_neigh(u)) {
   for (WNode* wn = g.out_neigh(u).begin(); wn < g.out_neigh(u).end(); wn++) {
-    #ifdef SWPF
+    #if defined(GHOSTPF)
+    if (wn < g.out_neigh(u).end() - 64) {
+      __builtin_prefetch(wn + 64);
+      __builtin_prefetch(&dist[(wn + 32)->v]);
+    }
+    #elif defined(SWPF)
     if (wn < g.out_neigh(u).end() - 64) {
       __builtin_prefetch(wn+64); 
       __builtin_prefetch(&dist[(wn+32)->v]); 
@@ -143,6 +162,8 @@ void RelaxEdges(const WGraph &g, NodeID u, WeightT delta,
 pvector<WeightT> DeltaStep(const WGraph &g, NodeID source, WeightT delta,
                            bool logging_enabled = false) {
   Timer t;
+  if (logging_enabled)
+    PrintStep("Source", static_cast<int64_t>(source));
   pvector<WeightT> dist(g.num_nodes(), kDistInf);
   dist[source] = 0;
   pvector<NodeID> frontier(g.num_edges_directed());
@@ -151,7 +172,9 @@ pvector<WeightT> DeltaStep(const WGraph &g, NodeID source, WeightT delta,
   size_t frontier_tails[2] = {1, 0};
   frontier[0] = source;
   t.Start();
+  #if !defined(GHOSTPF) || defined(GT_FORCE_OMP_FALLBACK)
   #pragma omp parallel
+  #endif
   {
     vector<vector<NodeID> > local_bins(0);
     size_t iter = 0;
@@ -165,7 +188,11 @@ pvector<WeightT> DeltaStep(const WGraph &g, NodeID source, WeightT delta,
       // {
       //   loop_timer.Start(); 
       // }
+      #if defined(GHOSTPF) && !defined(GT_FORCE_OMP_FALLBACK)
+      GT_SSSP_PRAGMA
+      #else
       #pragma omp for nowait schedule(dynamic, 64)
+      #endif
       for (size_t i=0; i < curr_frontier_tail; i++) {
         NodeID u = frontier[i];
         if (dist[u] >= delta * static_cast<WeightT>(curr_bin_index))
@@ -298,3 +325,5 @@ int main(int argc, char* argv[]) {
   #endif 
   return 0;
 }
+
+#undef GT_SSSP_PRAGMA

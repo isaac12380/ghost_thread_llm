@@ -116,6 +116,9 @@ using namespace std;
 
 TimeDiff time_diff; 
 HyperParam_PfT hyper_param; 
+uint64_t sync_too_fast = 0;
+uint64_t sync_too_slow = 0;
+uint64_t sync_serial_end = 0;
 
 void PrefetchThread_web(const Graph *g, int r, NodeID *comp, NodeID *end) {
   #if defined(WEB) && !defined(TUNING)
@@ -124,6 +127,9 @@ void PrefetchThread_web(const Graph *g, int r, NodeID *comp, NodeID *end) {
   #else
   HyperParam_PfT hyperparam = hyper_param; 
   #endif 
+  uint64_t local_too_fast = 0;
+  uint64_t local_too_slow = 0;
+  uint64_t local_serial_end = 0;
   bool serialize_flag = false; 
   for (NodeID u = 0; u < g->num_nodes(); u++) { 
     for (const NodeID &v : g->out_neigh(u, r)) { // 134217728 iter per invoc 
@@ -143,8 +149,25 @@ void PrefetchThread_web(const Graph *g, int r, NodeID *comp, NodeID *end) {
       array_counter++; 
     }
     #endif 
-    sync<NodeID>(u, 1, u, true, time_diff, ORDER_READ, serialize_flag, hyperparam); 
+    if (u % hyperparam.sync_frequency == 0 || serialize_flag) {
+      asm volatile ("serialize\n\t");
+      size_t main_counter = time_diff.read_atomic_main(ORDER_READ);
+      if (main_counter >= u) {
+        local_too_slow++;
+        serialize_flag = false;
+        u = static_cast<NodeID>(main_counter + hyperparam.skip_offset);
+      } else if (u - main_counter > hyperparam.serialize_threshold) {
+        local_too_fast++;
+        serialize_flag = true;
+      } else if (u - main_counter < hyperparam.unserialize_threshold) {
+        local_serial_end++;
+        serialize_flag = false;
+      }
+    }
   }
+  sync_too_fast += local_too_fast;
+  sync_too_slow += local_too_slow;
+  sync_serial_end += local_serial_end;
 }
 
 void PrefetchThread_kron_twitter(const Graph *g, int r, NodeID *comp, NodeID *end) {
@@ -154,6 +177,9 @@ void PrefetchThread_kron_twitter(const Graph *g, int r, NodeID *comp, NodeID *en
   #else
   HyperParam_PfT hyperparam = hyper_param; 
   #endif 
+  uint64_t local_too_fast = 0;
+  uint64_t local_too_slow = 0;
+  uint64_t local_serial_end = 0;
   bool serialize_flag = false; 
   for (NodeID u = 0; u < g->num_nodes(); u++) { 
     for (NodeID v : g->out_neigh(u, r)) { // 134217728 iter per invoc 
@@ -173,8 +199,25 @@ void PrefetchThread_kron_twitter(const Graph *g, int r, NodeID *comp, NodeID *en
       array_counter++; 
     }
     #endif 
-    sync<NodeID>(u, 1, u, true, time_diff, ORDER_READ, serialize_flag, hyperparam); 
+    if (u % hyperparam.sync_frequency == 0 || serialize_flag) {
+      asm volatile ("serialize\n\t");
+      size_t main_counter = time_diff.read_atomic_main(ORDER_READ);
+      if (main_counter >= u) {
+        local_too_slow++;
+        serialize_flag = false;
+        u = static_cast<NodeID>(main_counter + hyperparam.skip_offset);
+      } else if (u - main_counter > hyperparam.serialize_threshold) {
+        local_too_fast++;
+        serialize_flag = true;
+      } else if (u - main_counter < hyperparam.unserialize_threshold) {
+        local_serial_end++;
+        serialize_flag = false;
+      }
+    }
   }
+  sync_too_fast += local_too_fast;
+  sync_too_slow += local_too_slow;
+  sync_serial_end += local_serial_end;
 }
 
 void PrefetchThread_urand(const Graph *g, int r, NodeID *comp, NodeID *end) {
@@ -184,6 +227,9 @@ void PrefetchThread_urand(const Graph *g, int r, NodeID *comp, NodeID *end) {
   #else
   HyperParam_PfT hyperparam = hyper_param; 
   #endif 
+  uint64_t local_too_fast = 0;
+  uint64_t local_too_slow = 0;
+  uint64_t local_serial_end = 0;
   #ifdef TIMESTAMP
   uint32_t local_counter = 0; 
   #endif 
@@ -211,7 +257,21 @@ void PrefetchThread_urand(const Graph *g, int r, NodeID *comp, NodeID *end) {
       #endif 
       break;
     }
-    sync<NodeID>(u, 1, u, true, time_diff, ORDER_READ, serialize_flag, hyperparam); 
+    if (u % hyperparam.sync_frequency == 0 || serialize_flag) {
+      asm volatile ("serialize\n\t");
+      size_t main_counter = time_diff.read_atomic_main(ORDER_READ);
+      if (main_counter >= u) {
+        local_too_slow++;
+        serialize_flag = false;
+        u = static_cast<NodeID>(main_counter + hyperparam.skip_offset);
+      } else if (u - main_counter > hyperparam.serialize_threshold) {
+        local_too_fast++;
+        serialize_flag = true;
+      } else if (u - main_counter < hyperparam.unserialize_threshold) {
+        local_serial_end++;
+        serialize_flag = false;
+      }
+    }
     #ifdef TIMESTAMP
     if (local_counter % 10 == 0) {
       int diff = u - ((int) time_diff.read_atomic_main(ORDER_READ)); 
@@ -221,6 +281,9 @@ void PrefetchThread_urand(const Graph *g, int r, NodeID *comp, NodeID *end) {
     }
     #endif 
   }
+  sync_too_fast += local_too_fast;
+  sync_too_slow += local_too_slow;
+  sync_serial_end += local_serial_end;
 }
 
 // Place nodes u and v in same component of lower component ID
@@ -280,6 +343,11 @@ NodeID SampleFrequentElement(const pvector<NodeID>& comp,
 
 pvector<NodeID> Afforest(const Graph &g, bool logging_enabled = false,
                          int32_t neighbor_rounds = 2) {
+  #ifdef HTPF
+  sync_too_fast = 0;
+  sync_too_slow = 0;
+  sync_serial_end = 0;
+  #endif
   pvector<NodeID> comp(g.num_nodes());
 
   // Initialize each node to a single-node self-pointing tree
@@ -297,8 +365,6 @@ pvector<NodeID> Afforest(const Graph &g, bool logging_enabled = false,
     thread PF(PrefetchThread_kron_twitter, &g, r, comp.begin(), comp.end()); 
     #elif defined(WEB)
     thread PF(PrefetchThread_web, &g, r, comp.begin(), comp.end()); 
-    #else
-    thread PF(PrefetchThread_kron_twitter, &g, r, comp.begin(), comp.end());
     #endif 
     #endif 
   #pragma omp parallel for schedule(dynamic,16384)
@@ -363,6 +429,11 @@ pvector<NodeID> Afforest(const Graph &g, bool logging_enabled = false,
   }
   // Finally, 'compress' for final convergence
   Compress(g, comp);
+  #ifdef HTPF
+  cout << "sync trace counters: too_fast=" << sync_too_fast
+       << " too_slow=" << sync_too_slow
+       << " serial_end=" << sync_serial_end << endl;
+  #endif
   return comp;
 }
 

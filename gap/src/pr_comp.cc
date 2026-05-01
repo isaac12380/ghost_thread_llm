@@ -35,6 +35,20 @@ using namespace std;
 typedef float ScoreT;
 const float kDamp = 0.85;
 
+#if defined(GT_FORCE_OMP_FALLBACK)
+#define GT_PR_PRAGMA _Pragma("omp parallel for reduction(+ : error) schedule(dynamic, 16384)")
+#elif defined(GHOSTPF) && defined(GT_WEB_STANFORD)
+#define GT_PR_PRAGMA _Pragma("ghost_threading sync_frequency(40) skip_iter(30) serial_max_threshold(100) serial_min_threshold(95) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_WEB_GOOGLE)
+#define GT_PR_PRAGMA _Pragma("ghost_threading sync_frequency(20) skip_iter(60) serial_max_threshold(100) serial_min_threshold(95) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_AMAZON0312)
+#define GT_PR_PRAGMA _Pragma("ghost_threading sync_frequency(20) skip_iter(30) serial_max_threshold(100) serial_min_threshold(98) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_ROADNET_PA)
+#define GT_PR_PRAGMA _Pragma("ghost_threading sync_frequency(20) skip_iter(30) serial_max_threshold(100) serial_min_threshold(95) accurate_sync(disable)")
+#else
+#define GT_PR_PRAGMA
+#endif
+
 // #define SWPF
 
 pvector<ScoreT> PageRankPullGS(const Graph &g, int max_iters, double epsilon=0,
@@ -48,12 +62,21 @@ pvector<ScoreT> PageRankPullGS(const Graph &g, int max_iters, double epsilon=0,
     outgoing_contrib[n] = init_score / g.out_degree(n);
   for (int iter=0; iter < max_iters; iter++) {
     double error = 0;
+    #if defined(GHOSTPF)
+    GT_PR_PRAGMA
+    #else
     #pragma omp parallel for reduction(+ : error) schedule(dynamic, 16384)
+    #endif
     for (NodeID u=0; u < g.num_nodes(); u++) {
       ScoreT incoming_total = 0;
       // for (NodeID v : g.in_neigh(u)) {
       for (NodeID* v = g.in_neigh(u).begin(); v < g.in_neigh(u).end(); v++) {
-        #ifdef SWPF
+        #if defined(GHOSTPF)
+        if (v + 64 < g.in_neigh(u).end()) {
+          __builtin_prefetch(v + 64);
+          __builtin_prefetch(&outgoing_contrib[*(v + 32)]);
+        }
+        #elif defined(SWPF)
         if (v + 64 < g.in_neigh(u).end()) {
           __builtin_prefetch(v + 64); 
           __builtin_prefetch(&outgoing_contrib[*(v + 32)]); 
@@ -126,3 +149,5 @@ int main(int argc, char* argv[]) {
   BenchmarkKernel(cli, g, PRBound, PrintTopScores, VerifierBound);
   return 0;
 }
+
+#undef GT_PR_PRAGMA

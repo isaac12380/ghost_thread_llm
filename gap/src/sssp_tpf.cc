@@ -88,6 +88,9 @@ const size_t kBinSizeThreshold = 1000;
 TimeDiff time_diff; 
 
 HyperParam_PfT hyper_param; 
+uint64_t sync_too_fast = 0;
+uint64_t sync_too_slow = 0;
+uint64_t sync_serial_end = 0;
 
 // #define HTPF
 // #define INNER 
@@ -148,6 +151,9 @@ std::chrono::_V2::system_clock::time_point time_array[TOTAL_ITER/FREQ+100];
 void PrefetchThread_urand(const WGraph* g, const WeightT* dist, const WeightT delta, 
   const NodeID* frontier, const size_t curr_frontier_tail, const size_t curr_bin_index) 
 {
+  uint64_t local_too_fast = 0;
+  uint64_t local_too_slow = 0;
+  uint64_t local_serial_end = 0;
   bool serialize_flag = false; 
   size_t start_iter = time_diff.read_atomic_main(ORDER_READ); //0; 
   for (size_t i=start_iter; i < curr_frontier_tail; i++) {
@@ -168,8 +174,25 @@ void PrefetchThread_urand(const WGraph* g, const WeightT* dist, const WeightT de
           ".endr" 
         );
     }
-    sync<size_t>(i, 1, i, true, time_diff, ORDER_READ, serialize_flag, hyper_param); 
+    if (i % hyper_param.sync_frequency == 0 || serialize_flag) {
+      asm volatile ("serialize\n\t");
+      size_t main_counter = time_diff.read_atomic_main(ORDER_READ);
+      if (main_counter >= i) {
+        local_too_slow++;
+        serialize_flag = false;
+        i = main_counter + hyper_param.skip_offset;
+      } else if (i - main_counter > hyper_param.serialize_threshold) {
+        local_too_fast++;
+        serialize_flag = true;
+      } else if (i - main_counter < hyper_param.unserialize_threshold) {
+        local_serial_end++;
+        serialize_flag = false;
+      }
+    }
   }
+  sync_too_fast += local_too_fast;
+  sync_too_slow += local_too_slow;
+  sync_serial_end += local_serial_end;
 }
 
 void PrefetchThread_web(const WGraph* g, const WeightT* dist, const WeightT delta, 
@@ -181,6 +204,9 @@ void PrefetchThread_web(const WGraph* g, const WeightT* dist, const WeightT delt
   HyperParam_PfT hyperparam = {.sync_frequency = 14, .skip_offset = 46, 
                                .serialize_threshold = 100, .unserialize_threshold = 95}; 
   #endif 
+  uint64_t local_too_fast = 0;
+  uint64_t local_too_slow = 0;
+  uint64_t local_serial_end = 0;
   bool serialize_flag = false; 
   size_t start_iter = time_diff.read_atomic_main(ORDER_READ); //0; 
   for (size_t i=start_iter; i < curr_frontier_tail; i++) {
@@ -198,8 +224,25 @@ void PrefetchThread_web(const WGraph* g, const WeightT* dist, const WeightT delt
         }
       }
     } 
-    sync<size_t>(i, 1, i, true, time_diff, ORDER_READ, serialize_flag, hyperparam); 
+    if (i % hyperparam.sync_frequency == 0 || serialize_flag) {
+      asm volatile ("serialize\n\t");
+      size_t main_counter = time_diff.read_atomic_main(ORDER_READ);
+      if (main_counter >= i) {
+        local_too_slow++;
+        serialize_flag = false;
+        i = main_counter + hyperparam.skip_offset;
+      } else if (i - main_counter > hyperparam.serialize_threshold) {
+        local_too_fast++;
+        serialize_flag = true;
+      } else if (i - main_counter < hyperparam.unserialize_threshold) {
+        local_serial_end++;
+        serialize_flag = false;
+      }
+    }
   }
+  sync_too_fast += local_too_fast;
+  sync_too_slow += local_too_slow;
+  sync_serial_end += local_serial_end;
 }
 
 // for kron and twitter 
@@ -207,6 +250,9 @@ void PrefetchThread_inner(const WGraph* g, const WeightT* dist, const WeightT de
   const NodeID* frontier, const size_t curr_frontier_tail, const size_t curr_bin_index) 
 {
   size_t j = 0; 
+  uint64_t local_too_fast = 0;
+  uint64_t local_too_slow = 0;
+  uint64_t local_serial_end = 0;
   bool serialize_flag = false; 
   for (size_t i=0; i < curr_frontier_tail; i++) {
     NodeID u = frontier[i];
@@ -233,10 +279,13 @@ void PrefetchThread_inner(const WGraph* g, const WeightT* dist, const WeightT de
           size_t main_j = time_diff.read_atomic_main(ORDER_READ); 
           // time_diff.insert_into_atomic_histogram(main_j, j); 
           if (main_j >= j) {
+            local_too_slow++;
             serialize_flag = false; 
           } else if (j - main_j > hyper_param.serialize_threshold) {
+            local_too_fast++;
             serialize_flag = true; 
           } else if (j - main_j < hyper_param.unserialize_threshold) {
+            local_serial_end++;
             serialize_flag = false; 
           } 
         }
@@ -245,6 +294,9 @@ void PrefetchThread_inner(const WGraph* g, const WeightT* dist, const WeightT de
       } // inner loop 
     } // if 
   } // outer loop 
+  sync_too_fast += local_too_fast;
+  sync_too_slow += local_too_slow;
+  sync_serial_end += local_serial_end;
 }
 
 inline
@@ -286,8 +338,11 @@ void RelaxEdges(const WGraph &g, NodeID u, WeightT delta,
 pvector<WeightT> DeltaStep(const WGraph &g, NodeID source, WeightT delta,
                            bool logging_enabled = false) {
   Timer t;
-  if (logging_enabled)
-    PrintStep("Source", static_cast<int64_t>(source));
+  #ifdef HTPF
+  sync_too_fast = 0;
+  sync_too_slow = 0;
+  sync_serial_end = 0;
+  #endif
   pvector<WeightT> dist(g.num_nodes(), kDistInf);
   dist[source] = 0;
   pvector<NodeID> frontier(g.num_edges_directed());
@@ -331,7 +386,7 @@ pvector<WeightT> DeltaStep(const WGraph &g, NodeID source, WeightT delta,
         time_diff.set_atomic_main(i, ORDER_WRITE); // for outer sync 
         #endif 
       }
-      #if defined(HTPF) && (defined(INNER) || defined(URAND) || defined(WEB))
+      #ifdef HTPF
       PF.join(); // wait PF thread 
       #endif 
 
@@ -376,6 +431,12 @@ pvector<WeightT> DeltaStep(const WGraph &g, NodeID source, WeightT delta,
     if (logging_enabled)
       cout << "took " << iter << " iterations" << endl;
   }
+  #ifdef HTPF
+  cout << "sync trace counters: source=" << source
+       << " too_fast=" << sync_too_fast
+       << " too_slow=" << sync_too_slow
+       << " serial_end=" << sync_serial_end << endl;
+  #endif
   return dist;
 }
 

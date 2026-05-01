@@ -96,9 +96,15 @@ std::chrono::_V2::system_clock::time_point time_array[TOTAL_ITER/FREQ+100];
 
 TimeDiff time_diff; 
 HyperParam_PfT hyper_param; 
+uint64_t sync_too_fast = 0;
+uint64_t sync_too_slow = 0;
+uint64_t sync_serial_end = 0;
 
 void PfThread(const Graph* g, ScoreT* const outgoing_contrib) {
     size_t local_counter = 0; 
+    uint64_t local_too_fast = 0;
+    uint64_t local_too_slow = 0;
+    uint64_t local_serial_end = 0;
     bool serialize_flag = false; 
     NodeID start_iter = time_diff.read_atomic_main(ORDER_READ); //0; 
     for (NodeID u=start_iter; u < g->num_nodes(); u++) {
@@ -111,13 +117,32 @@ void PfThread(const Graph* g, ScoreT* const outgoing_contrib) {
           asm volatile ("serialize\n\t"); 
         }
       }
-      sync<NodeID>(u, 1, u, false, time_diff, ORDER_READ, serialize_flag, hyper_param); 
+      if (u % hyper_param.sync_frequency == 0 || serialize_flag) {
+        size_t main_counter = time_diff.read_atomic_main(ORDER_READ);
+        if (main_counter >= u) {
+          local_too_slow++;
+          serialize_flag = false;
+          u = static_cast<NodeID>(main_counter + hyper_param.skip_offset);
+        } else if (u - main_counter > hyper_param.serialize_threshold) {
+          local_too_fast++;
+          serialize_flag = true;
+        } else if (u - main_counter < hyper_param.unserialize_threshold) {
+          local_serial_end++;
+          serialize_flag = false;
+        }
+      }
     }
+    sync_too_fast += local_too_fast;
+    sync_too_slow += local_too_slow;
+    sync_serial_end += local_serial_end;
 }
 
 #ifdef INNER
 void PfThread_inner(const Graph* g, ScoreT* const outgoing_contrib) {
     size_t local_counter = 0; 
+    uint64_t local_too_fast = 0;
+    uint64_t local_too_slow = 0;
+    uint64_t local_serial_end = 0;
     bool serialize_flag = false; 
     NodeID start_iter = time_diff.read_atomic_main(ORDER_READ); //0; 
     for (NodeID u=start_iter; u < g->num_nodes(); u++) {
@@ -135,6 +160,7 @@ void PfThread_inner(const Graph* g, ScoreT* const outgoing_contrib) {
           // asm volatile ("serialize\n\t"); // a serialize here to make sure the counter is most up-to-date 
           size_t main_counter = time_diff.read_atomic_main(ORDER_READ); 
           if (main_counter >= local_counter) { // if pf thread is too slow 
+            local_too_slow++;
             serialize_flag = false; 
             uint32_t remian_iter = g->in_neigh(u).end() - v; 
             if (main_counter - local_counter >= remian_iter) {
@@ -143,19 +169,29 @@ void PfThread_inner(const Graph* g, ScoreT* const outgoing_contrib) {
               v = v + (main_counter - local_counter) + hyper_param.skip_offset; 
             }
           } else if (local_counter - main_counter > hyper_param.serialize_threshold) { // pf thread is too fast 
+            local_too_fast++;
             serialize_flag = true; 
           } else if (local_counter - main_counter < hyper_param.unserialize_threshold) {
+            local_serial_end++;
             serialize_flag = false; 
           }
         }
         /*----inner sync----*/
       }
     }
+    sync_too_fast += local_too_fast;
+    sync_too_slow += local_too_slow;
+    sync_serial_end += local_serial_end;
 }
 #endif 
 
 pvector<ScoreT> PageRankPullGS(const Graph &g, int max_iters, double epsilon=0,
                                bool logging_enabled = false) {
+  #ifdef HTPF
+  sync_too_fast = 0;
+  sync_too_slow = 0;
+  sync_serial_end = 0;
+  #endif
   const ScoreT init_score = 1.0f / g.num_nodes();
   const ScoreT base_score = (1.0f - kDamp) / g.num_nodes();
   pvector<ScoreT> scores(g.num_nodes(), init_score);
@@ -220,6 +256,11 @@ pvector<ScoreT> PageRankPullGS(const Graph &g, int max_iters, double epsilon=0,
     if (error < epsilon)
       break;
   }
+  #ifdef HTPF
+  cout << "sync trace counters: too_fast=" << sync_too_fast
+       << " too_slow=" << sync_too_slow
+       << " serial_end=" << sync_serial_end << endl;
+  #endif
   return scores;
 }
 

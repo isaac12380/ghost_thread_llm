@@ -126,6 +126,9 @@ typedef double CountT;
 // TimeDiff histogram; 
 OMPSyncAtomic time_diff(2); 
 HyperParam_PfT hyper_param; 
+uint64_t sync_too_fast = 0;
+uint64_t sync_too_slow = 0;
+uint64_t sync_serial_end = 0;
 
 void PrefetchThread1_urand(const SlidingQueue<NodeID>* queue, const Graph* g,
     NodeID* depths, CountT* path_counts, NodeID depth) {
@@ -172,6 +175,9 @@ void PrefetchThread1_inner(const SlidingQueue<NodeID>* queue, const Graph* g,
   #endif 
   bool serialize_flag = false; 
   bool prefetch = true; 
+  uint64_t local_too_fast = 0;
+  uint64_t local_too_slow = 0;
+  uint64_t local_serial_end = 0;
   size_t j = 0; 
   for (auto q_iter = queue->begin(); q_iter < queue->end(); q_iter++) { 
     NodeID u = *q_iter;
@@ -195,10 +201,13 @@ void PrefetchThread1_inner(const SlidingQueue<NodeID>* queue, const Graph* g,
         size_t main_j = time_diff.read(0, ORDER_READ); 
         // histogram.insert_into_atomic_histogram(main_j, j); 
         if (main_j >= j) {
+          local_too_slow++;
           serialize_flag = false; 
         } else if (j - main_j > hyperparam.serialize_threshold) {
+          local_too_fast++;
           serialize_flag = true; 
         } else if (j - main_j < hyperparam.unserialize_threshold) {
+          local_serial_end++;
           serialize_flag = false; 
         } 
       }
@@ -206,6 +215,9 @@ void PrefetchThread1_inner(const SlidingQueue<NodeID>* queue, const Graph* g,
       /*---inner sync---*/
     }
   }
+  sync_too_fast += local_too_fast;
+  sync_too_slow += local_too_slow;
+  sync_serial_end += local_serial_end;
 }
 
 void PBFS(const Graph &g, NodeID source, pvector<CountT> &path_counts,
@@ -341,6 +353,9 @@ void PrefetchThread2_inner(const int d, const NodeID* begin, const NodeID* end,
   uint64_t j = 0; 
   bool serialize_flag = false; 
   bool prefetch = true; 
+  uint64_t local_too_fast = 0;
+  uint64_t local_too_slow = 0;
+  uint64_t local_serial_end = 0;
   for (auto it = begin; it < end; it++) { 
     NodeID u = *it;
     #ifndef ROAD // filter for kron and twitter
@@ -374,10 +389,13 @@ void PrefetchThread2_inner(const int d, const NodeID* begin, const NodeID* end,
         size_t main_j = time_diff.read(1, ORDER_READ); 
         // histogram.insert_into_atomic_histogram(main_j, j); 
         if (main_j >= j) {
+          local_too_slow++;
           serialize_flag = false; 
         } else if (j - main_j > hyperparam.serialize_threshold) {
+          local_too_fast++;
           serialize_flag = true; 
         } else if (j - main_j < hyperparam.unserialize_threshold) {
+          local_serial_end++;
           serialize_flag = false; 
         } 
       }
@@ -385,6 +403,9 @@ void PrefetchThread2_inner(const int d, const NodeID* begin, const NodeID* end,
     }
     __builtin_prefetch(&scores[u]); // prefetch scores[u] 
   }
+  sync_too_fast += local_too_fast;
+  sync_too_slow += local_too_slow;
+  sync_serial_end += local_serial_end;
 }
 
 pvector<ScoreT> Brandes(const Graph &g, SourcePicker<Graph> &sp,
@@ -401,6 +422,11 @@ pvector<ScoreT> Brandes(const Graph &g, SourcePicker<Graph> &sp,
     PrintStep("a", t.Seconds());
   const NodeID* g_out_start = g.out_neigh(0).begin();
   for (NodeID iter=0; iter < num_iters; iter++) {
+    #ifdef HTPF
+    sync_too_fast = 0;
+    sync_too_slow = 0;
+    sync_serial_end = 0;
+    #endif
     NodeID source = sp.PickNext();
     if (logging_enabled)
       PrintStep("Source", static_cast<int64_t>(source));
@@ -452,6 +478,12 @@ pvector<ScoreT> Brandes(const Graph &g, SourcePicker<Graph> &sp,
     t.Stop();
     if (logging_enabled)
       PrintStep("p", t.Seconds());
+    #ifdef HTPF
+    cout << "sync trace counters: source=" << source
+         << " too_fast=" << sync_too_fast
+         << " too_slow=" << sync_too_slow
+         << " serial_end=" << sync_serial_end << endl;
+    #endif
   }
   // normalize scores
   ScoreT biggest_score = 0;

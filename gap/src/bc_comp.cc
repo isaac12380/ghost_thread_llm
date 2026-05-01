@@ -51,17 +51,34 @@ using namespace std;
 typedef float ScoreT;
 typedef double CountT;
 
+#if defined(GHOSTPF) && defined(GT_WEB_STANFORD)
+#define GT_BC_PBFS_PRAGMA _Pragma("ghost_threading sync_frequency(200) skip_iter(1) serial_max_threshold(80) serial_min_threshold(50) accurate_sync(disable)")
+#define GT_BC_BACK_PRAGMA _Pragma("ghost_threading sync_frequency(200) skip_iter(1) serial_max_threshold(80) serial_min_threshold(50) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_WEB_GOOGLE)
+#define GT_BC_PBFS_PRAGMA _Pragma("ghost_threading sync_frequency(400) skip_iter(1) serial_max_threshold(300) serial_min_threshold(295) accurate_sync(disable)")
+#define GT_BC_BACK_PRAGMA _Pragma("ghost_threading sync_frequency(400) skip_iter(1) serial_max_threshold(300) serial_min_threshold(295) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_AMAZON0312)
+#define GT_BC_PBFS_PRAGMA _Pragma("ghost_threading sync_frequency(2) skip_iter(16) serial_max_threshold(60) serial_min_threshold(59) accurate_sync(disable)")
+#define GT_BC_BACK_PRAGMA _Pragma("ghost_threading sync_frequency(2) skip_iter(16) serial_max_threshold(60) serial_min_threshold(59) accurate_sync(disable)")
+#elif defined(GHOSTPF) && defined(GT_ROADNET_PA)
+#define GT_BC_PBFS_PRAGMA _Pragma("ghost_threading sync_frequency(500) skip_iter(1) serial_max_threshold(80) serial_min_threshold(50) accurate_sync(disable)")
+#define GT_BC_BACK_PRAGMA _Pragma("ghost_threading sync_frequency(500) skip_iter(1) serial_max_threshold(80) serial_min_threshold(50) accurate_sync(disable)")
+#else
+#define GT_BC_PBFS_PRAGMA
+#define GT_BC_BACK_PRAGMA
+#endif
+
 #ifdef INNER_COUNT
-#define BOUNDARY 64 
+#define BOUNDARY 64
 
-static map<int, uint64_t> inner_histogram; 
-uint64_t max_count; 
-#endif 
+static map<int, uint64_t> inner_histogram;
+uint64_t max_count;
+#endif
 
-static double loop_time; 
-Timer loop_timer; 
+static double loop_time;
+Timer loop_timer;
 
-// #define SWPF 
+// #define SWPF
 // #define OMP
 
 #ifndef NT
@@ -78,7 +95,9 @@ void PBFS(const Graph &g, NodeID source, pvector<CountT> &path_counts,
   depth_index.push_back(queue.begin());
   queue.slide_window();
   const NodeID* g_out_start = g.out_neigh(0).begin();
+  #if !defined(GHOSTPF)
   #pragma omp parallel
+  #endif
   {
     NodeID depth = 0;
     QueueBuffer<NodeID> lqueue(queue);
@@ -87,23 +106,32 @@ void PBFS(const Graph &g, NodeID source, pvector<CountT> &path_counts,
       // #pragma omp barrier
       // #pragma omp single
       // {
-      //   loop_timer.Start(); 
+      //   loop_timer.Start();
       // }
+      #if defined(GHOSTPF)
+      GT_BC_PBFS_PRAGMA
+      #else
       #pragma omp for schedule(dynamic, 64) nowait
+      #endif
       for (auto q_iter = queue.begin(); q_iter < queue.end(); q_iter++) { // iter per invoc 16777216
         NodeID u = *q_iter;
         #ifdef INNER_COUNT
-        uint64_t count = 0; 
-        #endif 
-        for (NodeID* v = g.out_neigh(u).begin(); v < g.out_neigh(u).end(); v++) { // iter per invoc 32 
-        // for (NodeID &v : g.out_neigh(u)) { // iter per invoc 32 
-          // v: 20 cpi, 20%; depths[v] 62 cpi, 58% 
-          #ifdef SWPF
+        uint64_t count = 0;
+        #endif
+        for (NodeID* v = g.out_neigh(u).begin(); v < g.out_neigh(u).end(); v++) { // iter per invoc 32
+        // for (NodeID &v : g.out_neigh(u)) { // iter per invoc 32
+          // v: 20 cpi, 20%; depths[v] 62 cpi, 58%
+          #if defined(GHOSTPF)
           if (v + 64 < g.out_neigh(u).end()) {
-            __builtin_prefetch(v + 64); 
-            __builtin_prefetch(&depths[*(v + 32)]); 
+            __builtin_prefetch(v + 64);
+            __builtin_prefetch(&depths[*(v + 32)]);
           }
-          #endif 
+          #elif defined(SWPF)
+          if (v + 64 < g.out_neigh(u).end()) {
+            __builtin_prefetch(v + 64);
+            __builtin_prefetch(&depths[*(v + 32)]);
+          }
+          #endif
           if ((depths[*v] == -1) &&
               (compare_and_swap(depths[*v], static_cast<NodeID>(-1), depth))) {
             lqueue.push_back(*v);
@@ -111,26 +139,26 @@ void PBFS(const Graph &g, NodeID source, pvector<CountT> &path_counts,
           if (depths[*v] == depth) {
             succ.set_bit_atomic(v - g_out_start);
             #pragma omp atomic
-            path_counts[*v] += path_counts[u]; // path_counts[v] 69 cpi, 11.7% 
+            path_counts[*v] += path_counts[u]; // path_counts[v] 69 cpi, 11.7%
           }
           #ifdef INNER_COUNT
-          count++; 
-          #endif 
+          count++;
+          #endif
         }
         #ifdef INNER_COUNT
-        max_count = max_count >= count ? max_count : count; 
+        max_count = max_count >= count ? max_count : count;
         if (count >= BOUNDARY)
-          inner_histogram[BOUNDARY]++; 
+          inner_histogram[BOUNDARY]++;
         else
-          inner_histogram[count]++;   
-        #endif 
+          inner_histogram[count]++;
+        #endif
       }
       // #pragma omp barrier
-      // #pragma omp single nowait 
+      // #pragma omp single nowait
       // {
-      //   loop_timer.Stop(); 
-      //   loop_time += loop_timer.Seconds(); 
-      // } 
+      //   loop_timer.Stop();
+      //   loop_time += loop_timer.Seconds();
+      // }
       lqueue.flush();
       #pragma omp barrier
       #pragma omp single
@@ -174,18 +202,33 @@ pvector<ScoreT> Brandes(const Graph &g, SourcePicker<Graph> &sp,
     t.Start();
     for (int d=depth_index.size()-2; d >= 0; d--) {
       // const auto start = chrono::high_resolution_clock::now();
+      #if defined(GHOSTPF)
+      GT_BC_BACK_PRAGMA
+      #else
       #pragma omp parallel for schedule(dynamic, 64)
-      for (auto it = depth_index[d]; it < depth_index[d+1]; it++) { // 16777216 iter per invoc 
+      #endif
+      for (auto it = depth_index[d]; it < depth_index[d+1]; it++) { // iter per invoc 16777216
         NodeID u = *it;
         ScoreT delta_u = 0;
+        #if defined(GHOSTPF)
+        g.out_neigh(u).prefetch_end();
+        #endif
         for (NodeID *v = g.out_neigh(u).begin(); v < g.out_neigh(u).end(); v++) {
         // for (NodeID &v : g.out_neigh(u)) {
-          #ifdef SWPF
+          #if defined(GHOSTPF)
           if (v + 64 < g.out_neigh(u).end()) {
-            __builtin_prefetch(v + 64); 
-            __builtin_prefetch(&path_counts[*(v+32)]); 
+            __builtin_prefetch(v + 64);
           }
-          #endif 
+          if (succ.get_bit(v - g_out_start)) {
+            __builtin_prefetch(&path_counts[*v]);
+            __builtin_prefetch(&deltas[*v]);
+          }
+          #elif defined(SWPF)
+          if (v + 64 < g.out_neigh(u).end()) {
+            __builtin_prefetch(v + 64);
+            __builtin_prefetch(&path_counts[*(v+32)]);
+          }
+          #endif
           if (succ.get_bit(v - g_out_start)) {
             delta_u += (path_counts[u] / path_counts[*v]) * (1 + deltas[*v]);
           }
@@ -194,7 +237,7 @@ pvector<ScoreT> Brandes(const Graph &g, SourcePicker<Graph> &sp,
         scores[u] += delta_u;
       }
       // const auto end = chrono::high_resolution_clock::now();
-      // loop_time += chrono::duration_cast<chrono::microseconds>(end - start).count(); 
+      // loop_time += chrono::duration_cast<chrono::microseconds>(end - start).count();
     }
     t.Stop();
     if (logging_enabled)
@@ -295,14 +338,14 @@ bool BCVerifier(const Graph &g, SourcePicker<Graph> &sp, NodeID num_iters,
 int main(int argc, char* argv[]) {
   #ifdef OMP
   omp_set_num_threads(NT);
-  #endif  
+  #endif
   #ifdef INNER_COUNT
-  max_count = 0; 
+  max_count = 0;
   for (int i = 0; i <= BOUNDARY; i++) {
-    inner_histogram[i] = 0; 
+    inner_histogram[i] = 0;
   }
-  #endif 
-  // loop_time = 0.0; 
+  #endif
+  // loop_time = 0.0;
   CLIterApp cli(argc, argv, "betweenness-centrality", 1);
   if (!cli.ParseArgs())
     return -1;
@@ -320,12 +363,15 @@ int main(int argc, char* argv[]) {
     return BCVerifier(g, vsp, cli.num_iters(), scores);
   };
   BenchmarkKernel(cli, g, BCBound, PrintTopScores, VerifierBound);
-  // cout << "loop time = " << loop_time << "s" << endl; 
+  // cout << "loop time = " << loop_time << "s" << endl;
   #ifdef INNER_COUNT
   for (int i = 0; i <= BOUNDARY; i++) {
-    cout << inner_histogram[i] << endl; 
+    cout << inner_histogram[i] << endl;
   }
-  cout << max_count << endl; 
-  #endif 
+  cout << max_count << endl;
+  #endif
   return 0;
 }
+
+#undef GT_BC_PBFS_PRAGMA
+#undef GT_BC_BACK_PRAGMA

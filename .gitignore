@@ -21,3 +21,6 @@ scripts/*
 !scripts/run_snap_gap_experiments.sh
 !scripts/run_test.sh
 !scripts/run_tuning.sh
+!scripts/run_friendster_tuning.sh
+!scripts/run_orkut_tuning.sh
+

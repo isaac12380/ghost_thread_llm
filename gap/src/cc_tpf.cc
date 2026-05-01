@@ -297,6 +297,8 @@ pvector<NodeID> Afforest(const Graph &g, bool logging_enabled = false,
     thread PF(PrefetchThread_kron_twitter, &g, r, comp.begin(), comp.end()); 
     #elif defined(WEB)
     thread PF(PrefetchThread_web, &g, r, comp.begin(), comp.end()); 
+    #else
+    thread PF(PrefetchThread_kron_twitter, &g, r, comp.begin(), comp.end());
     #endif 
     #endif 
   #pragma omp parallel for schedule(dynamic,16384)

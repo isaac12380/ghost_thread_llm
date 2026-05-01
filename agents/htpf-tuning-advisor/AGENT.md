@@ -85,9 +85,9 @@ For both baseline and each candidate, collect the same two traces:
 Recommended setup:
 
 - fixed source
-- `-n 1`
+- `-n 5`
 - 3 to 5 serial repeats
-- every new sweep must include a baseline
+- every new sweep must include a baseline and omp
 
 ### 2. Explain Traces First, Then Explain Time
 
